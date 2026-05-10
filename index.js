@@ -1,4 +1,3 @@
-// worker.js
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -6,7 +5,7 @@ export default {
 
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS,DELETE",
       "Access-Control-Allow-Headers": "Content-Type",
       "Access-Control-Max-Age": "86400",
     };
@@ -25,8 +24,11 @@ export default {
         },
       });
 
-    const badRequest = (message) => json({ success: false, error: message }, { status: 400 });
-    const notFound = () => json({ success: false, error: "Not Found" }, { status: 404 });
+    const badRequest = (message) =>
+      json({ success: false, error: message }, { status: 400 });
+
+    const notFound = () =>
+      json({ success: false, error: "Not Found" }, { status: 404 });
 
     const readJson = async () => {
       try {
@@ -48,6 +50,23 @@ export default {
       if (typeof v !== "string") return fallback;
       return v.trim();
     };
+
+    const toObject = (v, fallback) => {
+      if (v && typeof v === "object" && !Array.isArray(v)) return v;
+      return fallback;
+    };
+
+    async function getUserPublicKey(userId) {
+      if (!userId) return "";
+      try {
+        const raw = await env.USERS.get(`user:${userId}`);
+        if (!raw) return "";
+        const user = JSON.parse(raw);
+        return safeString(user.publicKey, "");
+      } catch {
+        return "";
+      }
+    }
 
     // -----------------------------
     // HEALTH CHECK
@@ -78,21 +97,18 @@ export default {
       const userId = safeString(data.userId);
       if (!userId) return badRequest("userId wajib diisi.");
 
+      const existing = await env.USERS.get(`user:${userId}`);
+      const prev = existing ? JSON.parse(existing) : null;
+
       const user = {
         userId,
-        name: safeString(data.name, "Pengunjung") || "Pengunjung",
-        avatar: safeString(data.avatar, "#ff7e5f") || "#ff7e5f",
-        bio: safeString(data.bio, ""),
-        publicKey: safeString(data.publicKey, ""),
+        name: safeString(data.name, prev?.name || "Pengunjung") || "Pengunjung",
+        avatar: safeString(data.avatar, prev?.avatar || "#ff7e5f") || "#ff7e5f",
+        bio: safeString(data.bio, prev?.bio || ""),
+        publicKey: safeString(data.publicKey, prev?.publicKey || ""),
         updatedAt: now(),
-        createdAt: now(),
+        createdAt: prev?.createdAt ?? now(),
       };
-
-      const existing = await env.USERS.get(`user:${userId}`);
-      if (existing) {
-        const prev = JSON.parse(existing);
-        user.createdAt = prev.createdAt ?? user.createdAt;
-      }
 
       await env.USERS.put(`user:${userId}`, JSON.stringify(user));
       return json({ success: true, user });
@@ -107,7 +123,12 @@ export default {
       if (!userId) return badRequest("userId wajib diisi.");
 
       const raw = await env.USERS.get(`user:${userId}`);
-      if (!raw) return json({ success: false, error: "User tidak ditemukan." }, { status: 404 });
+      if (!raw) {
+        return json(
+          { success: false, error: "User tidak ditemukan." },
+          { status: 404 }
+        );
+      }
 
       return json({ success: true, user: JSON.parse(raw) });
     }
@@ -121,7 +142,10 @@ export default {
     //   "senderName": "Genta",
     //   "avatar": "#ff7e5f",
     //   "text": "Halo laut",
+    //   "ownerPublicKey": "...",
     //   "position": { "x": 1, "y": 0.1, "z": -3 },
+    //   "velocity": { "x": 0.2, "y": 0.1, "z": 0 },
+    //   "seed": 12345,
     //   "meta": { ...optional }
     // }
     // -----------------------------
@@ -136,17 +160,30 @@ export default {
       if (!text) return badRequest("text wajib diisi.");
 
       const bottleId = safeString(data.id) || `bottle_${crypto.randomUUID()}`;
+
+      let ownerPublicKey = safeString(
+        data.ownerPublicKey || data.senderPublicKey || data.publicKey,
+        ""
+      );
+
+      if (!ownerPublicKey) {
+        ownerPublicKey = await getUserPublicKey(senderId);
+      }
+
       const bottle = {
         id: bottleId,
         senderId,
         senderName: safeString(data.senderName, "Pengunjung") || "Pengunjung",
         avatar: safeString(data.avatar, "#ff7e5f") || "#ff7e5f",
         text,
-        position: data.position && typeof data.position === "object" ? data.position : { x: 0, y: 0.1, z: 0 },
+        ownerPublicKey,
+        position: toObject(data.position, { x: 0, y: 0.1, z: 0 }),
+        velocity: toObject(data.velocity, { x: 0, y: 0.2, z: 0 }),
+        seed: Number.isFinite(Number(data.seed)) ? Number(data.seed) : Math.floor(Math.random() * 1e9),
         floating: Boolean(data.floating ?? false),
         repliesCount: 0,
-        meta: data.meta && typeof data.meta === "object" ? data.meta : {},
-        createdAt: now(),
+        meta: toObject(data.meta, {}),
+        createdAt: Number.isFinite(Number(data.createdAt)) ? Number(data.createdAt) : now(),
         updatedAt: now(),
       };
 
@@ -172,7 +209,11 @@ export default {
         const raw = await env.BOTTLES.get(key.name);
         if (!raw) continue;
         try {
-          items.push(JSON.parse(raw));
+          const bottle = JSON.parse(raw);
+          if (!bottle.ownerPublicKey && bottle.senderId) {
+            bottle.ownerPublicKey = await getUserPublicKey(bottle.senderId);
+          }
+          items.push(bottle);
         } catch {
           // skip bad JSON
         }
@@ -196,9 +237,19 @@ export default {
       if (!bottleId) return badRequest("bottleId wajib diisi.");
 
       const raw = await env.BOTTLES.get(`bottle:${bottleId}`);
-      if (!raw) return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
+      if (!raw) {
+        return json(
+          { success: false, error: "Botol tidak ditemukan." },
+          { status: 404 }
+        );
+      }
 
-      return json({ success: true, bottle: JSON.parse(raw) });
+      const bottle = JSON.parse(raw);
+      if (!bottle.ownerPublicKey && bottle.senderId) {
+        bottle.ownerPublicKey = await getUserPublicKey(bottle.senderId);
+      }
+
+      return json({ success: true, bottle });
     }
 
     // -----------------------------
@@ -210,13 +261,10 @@ export default {
     //   "fromUserId": "uid_a",
     //   "toUserId": "uid_b",
     //   "ciphertext": "base64...",
-    //   "encType": "AES-GCM",
+    //   "encType": "RSA-OAEP",
     //   "nonce": "base64...",
     //   "createdAt": 123
     // }
-    //
-    // Worker TIDAK membaca isi reply.
-    // Simpan ciphertext apa adanya.
     // -----------------------------
     if (pathname === "/replies" && request.method === "POST") {
       const data = await readJson();
@@ -233,7 +281,12 @@ export default {
       if (!ciphertext) return badRequest("ciphertext wajib diisi.");
 
       const bottleRaw = await env.BOTTLES.get(`bottle:${bottleId}`);
-      if (!bottleRaw) return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
+      if (!bottleRaw) {
+        return json(
+          { success: false, error: "Botol tidak ditemukan." },
+          { status: 404 }
+        );
+      }
 
       const replyId = safeString(data.id) || `reply_${crypto.randomUUID()}`;
       const reply = {
@@ -243,7 +296,7 @@ export default {
         toUserId,
         ciphertext,
         nonce: safeString(data.nonce, ""),
-        encType: safeString(data.encType, "AES-GCM"),
+        encType: safeString(data.encType, "RSA-OAEP"),
         createdAt: Number.isFinite(Number(data.createdAt)) ? Number(data.createdAt) : now(),
         updatedAt: now(),
       };
@@ -261,13 +314,12 @@ export default {
     // -----------------------------
     // LIST REPLIES FOR A BOTTLE
     // GET /replies?bottleId=xxx&toUserId=yyy
-    // Note: server tetap tidak bisa decrypt.
     // -----------------------------
     if (pathname === "/replies" && request.method === "GET") {
       const bottleId = safeString(url.searchParams.get("bottleId"));
       if (!bottleId) return badRequest("bottleId wajib diisi.");
 
-      const toUserId = safeString(url.searchParams.get("toUserId")); // optional, buat filter di client
+      const toUserId = safeString(url.searchParams.get("toUserId"));
       const list = await env.REPLIES.list({ prefix: `reply:${bottleId}:` });
 
       const replies = [];
@@ -294,7 +346,7 @@ export default {
     }
 
     // -----------------------------
-    // DELETE BOTTLE (opsional)
+    // DELETE BOTTLE
     // DELETE /bottles/:id
     // -----------------------------
     if (pathname.startsWith("/bottles/") && request.method === "DELETE") {
@@ -302,12 +354,15 @@ export default {
       if (!bottleId) return badRequest("bottleId wajib diisi.");
 
       const raw = await env.BOTTLES.get(`bottle:${bottleId}`);
-      if (!raw) return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
+      if (!raw) {
+        return json(
+          { success: false, error: "Botol tidak ditemukan." },
+          { status: 404 }
+        );
+      }
 
-      // hapus botol
       await env.BOTTLES.delete(`bottle:${bottleId}`);
 
-      // hapus semua reply yang terkait
       const replies = await env.REPLIES.list({ prefix: `reply:${bottleId}:` });
       for (const key of replies.keys) {
         await env.REPLIES.delete(key.name);
