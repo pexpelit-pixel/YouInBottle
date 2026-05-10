@@ -1,0 +1,9 @@
+name = "pulau-cinta-worker"
+main = "index.js"
+compatibility_date = "2026-05-10"
+
+kv_namespaces = [
+  { binding = "BOTTLES", id = "2fc320175d7e496e83c252e3c0d0f519" },
+  { binding = "REPLIES", id = "815f274c36574f65b2227030269ede71" },
+  { binding = "USERS", id = "9a2e8c6c6e054b19a043488a1d2304ea" }
+]
