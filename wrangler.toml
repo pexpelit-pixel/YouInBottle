@@ -5,5 +5,8 @@ compatibility_date = "2026-05-10"
 kv_namespaces = [
   { binding = "BOTTLES", id = "2fc320175d7e496e83c252e3c0d0f519" },
   { binding = "REPLIES", id = "815f274c36574f65b2227030269ede71" },
-  { binding = "USERS", id = "9a2e8c6c6e054b19a043488a1d2304ea" }
+  { binding = "USERS", id = "9a2e8c6c6e054b19a043488a1d2304ea" },
+  {binding = "CONVERSATIONS", id ="578dd19c890043949c8519db6fd16b77"},
+  { binding = "MESSAGES", id = "f84127a8f76043fd9ca44d54af7f20f1" },
+  { binding = "CONV_MAP", id = "eb8c9cae9b19496e8e323036d7709959" }
 ]
