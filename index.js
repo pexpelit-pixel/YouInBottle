@@ -56,6 +56,10 @@ export default {
       return fallback;
     };
 
+    const sortedPairKey = (a, b) => {
+      return [a, b].map(String).sort().join("|");
+    };
+
     async function getUserPublicKey(userId) {
       if (!userId) return "";
       try {
@@ -66,6 +70,45 @@ export default {
       } catch {
         return "";
       }
+    }
+
+    async function getBottleById(bottleId) {
+      const raw = await env.BOTTLES.get(`bottle:${bottleId}`);
+      if (!raw) return null;
+      try {
+        const bottle = JSON.parse(raw);
+        if (!bottle.ownerPublicKey && bottle.senderId) {
+          bottle.ownerPublicKey = await getUserPublicKey(bottle.senderId);
+        }
+        return bottle;
+      } catch {
+        return null;
+      }
+    }
+
+    async function getConversationById(conversationId) {
+      const raw = await env.CONVERSATIONS.get(`conv:${conversationId}`);
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+
+    async function refreshConversationLastMessage(conversationId, message) {
+      const conv = await getConversationById(conversationId);
+      if (!conv) return null;
+
+      conv.lastMessageAt = message.createdAt ?? now();
+      conv.updatedAt = now();
+      conv.messageCount = (conv.messageCount || 0) + 1;
+      conv.lastSenderId = message.senderId;
+      conv.lastCiphertext = message.ciphertext;
+      conv.lastEncType = message.encType || "RSA-OAEP";
+
+      await env.CONVERSATIONS.put(`conv:${conversationId}`, JSON.stringify(conv));
+      return conv;
     }
 
     // -----------------------------
@@ -81,14 +124,6 @@ export default {
 
     // -----------------------------
     // REGISTER / UPDATE USER
-    // Body:
-    // {
-    //   "userId": "uid_123",
-    //   "name": "Genta",
-    //   "avatar": "#ff7e5f",
-    //   "bio": "....",
-    //   "publicKey": "base64_or_jwk_string"
-    // }
     // -----------------------------
     if (pathname === "/users/register" && request.method === "POST") {
       const data = await readJson();
@@ -116,7 +151,6 @@ export default {
 
     // -----------------------------
     // GET USER PROFILE
-    // GET /users/:userId
     // -----------------------------
     if (pathname.startsWith("/users/") && request.method === "GET") {
       const userId = decodeURIComponent(pathname.replace("/users/", ""));
@@ -124,10 +158,7 @@ export default {
 
       const raw = await env.USERS.get(`user:${userId}`);
       if (!raw) {
-        return json(
-          { success: false, error: "User tidak ditemukan." },
-          { status: 404 }
-        );
+        return json({ success: false, error: "User tidak ditemukan." }, { status: 404 });
       }
 
       return json({ success: true, user: JSON.parse(raw) });
@@ -135,19 +166,6 @@ export default {
 
     // -----------------------------
     // CREATE BOTTLE
-    // Body:
-    // {
-    //   "id": "bottle_xxx",
-    //   "senderId": "uid_123",
-    //   "senderName": "Genta",
-    //   "avatar": "#ff7e5f",
-    //   "text": "Halo laut",
-    //   "ownerPublicKey": "...",
-    //   "position": { "x": 1, "y": 0.1, "z": -3 },
-    //   "velocity": { "x": 0.2, "y": 0.1, "z": 0 },
-    //   "seed": 12345,
-    //   "meta": { ...optional }
-    // }
     // -----------------------------
     if (pathname === "/bottles" && request.method === "POST") {
       const data = await readJson();
@@ -179,7 +197,9 @@ export default {
         ownerPublicKey,
         position: toObject(data.position, { x: 0, y: 0.1, z: 0 }),
         velocity: toObject(data.velocity, { x: 0, y: 0.2, z: 0 }),
-        seed: Number.isFinite(Number(data.seed)) ? Number(data.seed) : Math.floor(Math.random() * 1e9),
+        seed: Number.isFinite(Number(data.seed))
+          ? Number(data.seed)
+          : Math.floor(Math.random() * 1e9),
         floating: Boolean(data.floating ?? false),
         repliesCount: 0,
         meta: toObject(data.meta, {}),
@@ -197,7 +217,6 @@ export default {
 
     // -----------------------------
     // LIST BOTTLES
-    // GET /bottles?limit=50
     // -----------------------------
     if (pathname === "/bottles" && request.method === "GET") {
       const limit = clampInt(url.searchParams.get("limit"), 1, 100, 50);
@@ -206,17 +225,8 @@ export default {
       const items = [];
 
       for (const key of list.keys) {
-        const raw = await env.BOTTLES.get(key.name);
-        if (!raw) continue;
-        try {
-          const bottle = JSON.parse(raw);
-          if (!bottle.ownerPublicKey && bottle.senderId) {
-            bottle.ownerPublicKey = await getUserPublicKey(bottle.senderId);
-          }
-          items.push(bottle);
-        } catch {
-          // skip bad JSON
-        }
+        const bottle = await getBottleById(key.name.replace("bottle:", ""));
+        if (bottle) items.push(bottle);
       }
 
       items.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
@@ -230,41 +240,22 @@ export default {
 
     // -----------------------------
     // GET SINGLE BOTTLE
-    // GET /bottles/:id
     // -----------------------------
     if (pathname.startsWith("/bottles/") && request.method === "GET") {
       const bottleId = decodeURIComponent(pathname.replace("/bottles/", ""));
       if (!bottleId) return badRequest("bottleId wajib diisi.");
 
-      const raw = await env.BOTTLES.get(`bottle:${bottleId}`);
-      if (!raw) {
-        return json(
-          { success: false, error: "Botol tidak ditemukan." },
-          { status: 404 }
-        );
-      }
-
-      const bottle = JSON.parse(raw);
-      if (!bottle.ownerPublicKey && bottle.senderId) {
-        bottle.ownerPublicKey = await getUserPublicKey(bottle.senderId);
+      const bottle = await getBottleById(bottleId);
+      if (!bottle) {
+        return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
       }
 
       return json({ success: true, bottle });
     }
 
     // -----------------------------
-    // POST REPLY (E2E CIPHERTEXT)
-    // Body:
-    // {
-    //   "id": "reply_xxx",
-    //   "bottleId": "bottle_123",
-    //   "fromUserId": "uid_a",
-    //   "toUserId": "uid_b",
-    //   "ciphertext": "base64...",
-    //   "encType": "RSA-OAEP",
-    //   "nonce": "base64...",
-    //   "createdAt": 123
-    // }
+    // POST REPLY (LEGACY FLOW)
+    // masih dipertahankan supaya frontend lama tidak rusak
     // -----------------------------
     if (pathname === "/replies" && request.method === "POST") {
       const data = await readJson();
@@ -280,12 +271,9 @@ export default {
       if (!toUserId) return badRequest("toUserId wajib diisi.");
       if (!ciphertext) return badRequest("ciphertext wajib diisi.");
 
-      const bottleRaw = await env.BOTTLES.get(`bottle:${bottleId}`);
-      if (!bottleRaw) {
-        return json(
-          { success: false, error: "Botol tidak ditemukan." },
-          { status: 404 }
-        );
+      const bottle = await getBottleById(bottleId);
+      if (!bottle) {
+        return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
       }
 
       const replyId = safeString(data.id) || `reply_${crypto.randomUUID()}`;
@@ -303,7 +291,6 @@ export default {
 
       await env.REPLIES.put(`reply:${bottleId}:${replyId}`, JSON.stringify(reply));
 
-      const bottle = JSON.parse(bottleRaw);
       bottle.repliesCount = (bottle.repliesCount || 0) + 1;
       bottle.updatedAt = now();
       await env.BOTTLES.put(`bottle:${bottleId}`, JSON.stringify(bottle));
@@ -313,7 +300,6 @@ export default {
 
     // -----------------------------
     // LIST REPLIES FOR A BOTTLE
-    // GET /replies?bottleId=xxx&toUserId=yyy
     // -----------------------------
     if (pathname === "/replies" && request.method === "GET") {
       const bottleId = safeString(url.searchParams.get("bottleId"));
@@ -345,9 +331,222 @@ export default {
       });
     }
 
+    // =============================
+    // CONVERSATION SYSTEM
+    // =============================
+
+    // Create / get conversation dari bottle
+    // Body:
+    // {
+    //   "bottleId": "bottle_xxx",
+    //   "userAId": "uid_sender",
+    //   "userBId": "uid_receiver"
+    // }
+    if (pathname === "/conversations/create" && request.method === "POST") {
+      const data = await readJson();
+      if (!data) return badRequest("JSON tidak valid.");
+
+      const bottleId = safeString(data.bottleId);
+      const userAId = safeString(data.userAId);
+      const userBId = safeString(data.userBId);
+
+      if (!bottleId) return badRequest("bottleId wajib diisi.");
+      if (!userAId) return badRequest("userAId wajib diisi.");
+      if (!userBId) return badRequest("userBId wajib diisi.");
+
+      const bottle = await getBottleById(bottleId);
+      if (!bottle) {
+        return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
+      }
+
+      const pairKey = `${bottleId}|${sortedPairKey(userAId, userBId)}`;
+      const mapKey = `convmap:${pairKey}`;
+
+      const existingConvId = await env.CONV_MAP?.get(mapKey).catch(() => null);
+      if (existingConvId) {
+        const existingConv = await getConversationById(existingConvId);
+        if (existingConv) {
+          return json({ success: true, conversation: existingConv, existed: true });
+        }
+      }
+
+      const conversationId = `conv_${crypto.randomUUID()}`;
+      const conversation = {
+        id: conversationId,
+        bottleId,
+        participants: [userAId, userBId],
+        createdAt: now(),
+        updatedAt: now(),
+        lastMessageAt: null,
+        lastSenderId: "",
+        lastCiphertext: "",
+        lastEncType: "RSA-OAEP",
+        messageCount: 0,
+      };
+
+      await env.CONVERSATIONS.put(`conv:${conversationId}`, JSON.stringify(conversation));
+
+      // Simpan mapping agar conversation yang sama tidak dobel
+      if (env.CONV_MAP) {
+        await env.CONV_MAP.put(mapKey, conversationId);
+      }
+
+      return json({ success: true, conversation, existed: false });
+    }
+
+    // List conversations by userId
+    // GET /conversations?userId=xxx
+    if (pathname === "/conversations" && request.method === "GET") {
+      const userId = safeString(url.searchParams.get("userId"));
+      if (!userId) return badRequest("userId wajib diisi.");
+
+      const list = await env.CONVERSATIONS.list({ prefix: "conv:" });
+      const items = [];
+
+      for (const key of list.keys) {
+        const raw = await env.CONVERSATIONS.get(key.name);
+        if (!raw) continue;
+
+        try {
+          const conv = JSON.parse(raw);
+          if (!Array.isArray(conv.participants)) continue;
+          if (!conv.participants.includes(userId)) continue;
+          items.push(conv);
+        } catch {
+          // skip
+        }
+      }
+
+      items.sort((a, b) => (b.lastMessageAt ?? b.updatedAt ?? b.createdAt ?? 0) - (a.lastMessageAt ?? a.updatedAt ?? a.createdAt ?? 0));
+
+      return json({
+        success: true,
+        conversations: items,
+        count: items.length,
+      });
+    }
+
+    // Get single conversation
+    // GET /conversations/:id
+    if (pathname.startsWith("/conversations/") && request.method === "GET") {
+      const conversationId = decodeURIComponent(pathname.replace("/conversations/", ""));
+      if (!conversationId) return badRequest("conversationId wajib diisi.");
+
+      const conv = await getConversationById(conversationId);
+      if (!conv) {
+        return json({ success: false, error: "Conversation tidak ditemukan." }, { status: 404 });
+      }
+
+      return json({ success: true, conversation: conv });
+    }
+
+    // Send encrypted message
+    // Body:
+    // {
+    //   "conversationId": "conv_xxx",
+    //   "senderId": "uid_xxx",
+    //   "ciphertext": "base64...",
+    //   "encType": "RSA-OAEP",
+    //   "nonce": "base64..."
+    // }
+    if (pathname === "/messages" && request.method === "POST") {
+      const data = await readJson();
+      if (!data) return badRequest("JSON tidak valid.");
+
+      const conversationId = safeString(data.conversationId);
+      const senderId = safeString(data.senderId);
+      const ciphertext = safeString(data.ciphertext);
+
+      if (!conversationId) return badRequest("conversationId wajib diisi.");
+      if (!senderId) return badRequest("senderId wajib diisi.");
+      if (!ciphertext) return badRequest("ciphertext wajib diisi.");
+
+      const conv = await getConversationById(conversationId);
+      if (!conv) {
+        return json({ success: false, error: "Conversation tidak ditemukan." }, { status: 404 });
+      }
+
+      if (!Array.isArray(conv.participants) || !conv.participants.includes(senderId)) {
+        return json({ success: false, error: "Sender bukan participant conversation ini." }, { status: 403 });
+      }
+
+      const messageId = safeString(data.id) || `msg_${crypto.randomUUID()}`;
+      const message = {
+        id: messageId,
+        conversationId,
+        senderId,
+        ciphertext,
+        nonce: safeString(data.nonce, ""),
+        encType: safeString(data.encType, "RSA-OAEP"),
+        createdAt: Number.isFinite(Number(data.createdAt)) ? Number(data.createdAt) : now(),
+        updatedAt: now(),
+      };
+
+      await env.MESSAGES.put(`msg:${conversationId}:${messageId}`, JSON.stringify(message));
+      await refreshConversationLastMessage(conversationId, message);
+
+      return json({ success: true, message });
+    }
+
+    // List messages
+    // GET /messages?conversationId=xxx
+    if (pathname === "/messages" && request.method === "GET") {
+      const conversationId = safeString(url.searchParams.get("conversationId"));
+      if (!conversationId) return badRequest("conversationId wajib diisi.");
+
+      const list = await env.MESSAGES.list({ prefix: `msg:${conversationId}:` });
+      const messages = [];
+
+      for (const key of list.keys) {
+        const raw = await env.MESSAGES.get(key.name);
+        if (!raw) continue;
+
+        try {
+          messages.push(JSON.parse(raw));
+        } catch {
+          // skip
+        }
+      }
+
+      messages.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+
+      return json({
+        success: true,
+        conversationId,
+        messages,
+        count: messages.length,
+      });
+    }
+
+    // Mark conversation read
+    // POST /conversations/read
+    // Body: { "conversationId": "...", "userId": "..." }
+    if (pathname === "/conversations/read" && request.method === "POST") {
+      const data = await readJson();
+      if (!data) return badRequest("JSON tidak valid.");
+
+      const conversationId = safeString(data.conversationId);
+      const userId = safeString(data.userId);
+
+      if (!conversationId) return badRequest("conversationId wajib diisi.");
+      if (!userId) return badRequest("userId wajib diisi.");
+
+      const conv = await getConversationById(conversationId);
+      if (!conv) {
+        return json({ success: false, error: "Conversation tidak ditemukan." }, { status: 404 });
+      }
+
+      conv.updatedAt = now();
+      conv.lastReadAt = conv.lastReadAt || {};
+      conv.lastReadAt[userId] = now();
+
+      await env.CONVERSATIONS.put(`conv:${conversationId}`, JSON.stringify(conv));
+
+      return json({ success: true, conversation: conv });
+    }
+
     // -----------------------------
     // DELETE BOTTLE
-    // DELETE /bottles/:id
     // -----------------------------
     if (pathname.startsWith("/bottles/") && request.method === "DELETE") {
       const bottleId = decodeURIComponent(pathname.replace("/bottles/", ""));
@@ -355,10 +554,7 @@ export default {
 
       const raw = await env.BOTTLES.get(`bottle:${bottleId}`);
       if (!raw) {
-        return json(
-          { success: false, error: "Botol tidak ditemukan." },
-          { status: 404 }
-        );
+        return json({ success: false, error: "Botol tidak ditemukan." }, { status: 404 });
       }
 
       await env.BOTTLES.delete(`bottle:${bottleId}`);
